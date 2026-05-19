@@ -1,6 +1,7 @@
 import dataclasses
 import logging
 import re
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import flax.traverse_util
@@ -55,6 +56,29 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class ShapeAwareCheckpointWeightLoader(WeightLoader):
+    """Loads checkpoint weights while reinitializing explicitly allowed mismatched parameters.
+
+    This is useful when adapting a checkpoint to a new action dimensionality. Backbone
+    parameters are still required to match exactly; only parameters matching
+    `reinit_mismatched_regexes` may keep their current initialization.
+    """
+
+    params_path: str
+    reinit_mismatched_regexes: Sequence[str] = ()
+    missing_regex: str = ".*lora.*"
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        return _merge_params_shape_aware(
+            loaded_params,
+            params,
+            missing_regex=self.missing_regex,
+            reinit_mismatched_regexes=self.reinit_mismatched_regexes,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 
@@ -100,5 +124,51 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
     for k in {k for k in flat_ref if pattern.fullmatch(k)}:
         if k not in result:
             result[k] = flat_ref[k]
+
+    return flax.traverse_util.unflatten_dict(result, sep="/")
+
+
+def _merge_params_shape_aware(
+    loaded_params: at.Params,
+    params: at.Params,
+    *,
+    missing_regex: str,
+    reinit_mismatched_regexes: Sequence[str],
+) -> at.Params:
+    flat_ref = flax.traverse_util.flatten_dict(params, sep="/")
+    flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+
+    missing_pattern = re.compile(missing_regex)
+    reinit_patterns = [re.compile(pattern) for pattern in reinit_mismatched_regexes]
+
+    def should_reinit(key: str) -> bool:
+        return any(pattern.fullmatch(key) for pattern in reinit_patterns)
+
+    result = {}
+    for key, value in flat_loaded.items():
+        if key not in flat_ref:
+            continue
+        ref_value = flat_ref[key]
+        if value.shape == ref_value.shape:
+            result[key] = value.astype(ref_value.dtype) if value.dtype != ref_value.dtype else value
+            continue
+        if should_reinit(key):
+            logger.info(
+                "Keeping initialized parameter for shape-mismatched checkpoint key %s: checkpoint=%s model=%s",
+                key,
+                value.shape,
+                ref_value.shape,
+            )
+            continue
+        raise ValueError(
+            f"Shape mismatch at {key}: checkpoint has {value.shape}, model expects {ref_value.shape}. "
+            "Add an explicit reinit pattern if this parameter should be reinitialized."
+        )
+
+    for key, value in flat_ref.items():
+        if key in result:
+            continue
+        if missing_pattern.fullmatch(key) or should_reinit(key):
+            result[key] = value
 
     return flax.traverse_util.unflatten_dict(result, sep="/")

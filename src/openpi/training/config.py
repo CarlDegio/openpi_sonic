@@ -4,7 +4,9 @@ import abc
 from collections.abc import Sequence
 import dataclasses
 import difflib
+import json
 import logging
+import os
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
 
@@ -19,6 +21,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.g1_sonic_policy as g1_sonic_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -463,6 +466,101 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotG1SonicDataConfig(DataConfigFactory):
+    """Data config for Unitree G1 SONIC LeRobot datasets."""
+
+    task_instructions_path: str | None = None
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "ego_view": "observation.images.ego_view",
+                            "left_wrist": "observation.images.left_wrist",
+                            "right_wrist": "observation.images.right_wrist",
+                        },
+                        "observation": {
+                            "state": "observation.state",
+                            "projected_gravity": "observation.projected_gravity",
+                        },
+                        "action": {
+                            "motion_token": "action.motion_token",
+                        },
+                        "teleop": {
+                            "left_hand_joints": "teleop.left_hand_joints",
+                            "right_hand_joints": "teleop.right_hand_joints",
+                        },
+                        "task_index": "task_index",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = (
+        "action.motion_token",
+        "teleop.left_hand_joints",
+        "teleop.right_hand_joints",
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        task_instruction_variants = _load_task_instruction_variants(self.repo_id, self.task_instructions_path)
+        data_transforms = _transforms.Group(
+            inputs=[g1_sonic_policy.G1SonicInputs(task_instruction_variants=task_instruction_variants)],
+            outputs=[g1_sonic_policy.G1SonicOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+def _load_task_instruction_variants(
+    repo_id: str,
+    task_instructions_path: str | None,
+) -> dict[int, tuple[str, ...]]:
+    path = _resolve_task_instructions_path(repo_id, task_instructions_path)
+    if path is None or not path.exists():
+        return {}
+
+    variants: dict[int, list[str]] = {}
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            variants.setdefault(int(item["task_index"]), []).append(str(item["instruction"]))
+
+    return {task_index: tuple(instructions) for task_index, instructions in variants.items()}
+
+
+def _resolve_task_instructions_path(repo_id: str, task_instructions_path: str | None) -> pathlib.Path | None:
+    if task_instructions_path is not None:
+        return pathlib.Path(task_instructions_path).expanduser().resolve()
+
+    repo_path = pathlib.Path(repo_id).expanduser()
+    candidates = []
+    if repo_path.is_absolute():
+        candidates.append(repo_path / "meta" / "task_instructions.jsonl")
+    if hf_lerobot_home := os.environ.get("HF_LEROBOT_HOME"):
+        candidates.append(pathlib.Path(hf_lerobot_home).expanduser() / repo_id / "meta" / "task_instructions.jsonl")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -554,6 +652,82 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+
+
+def _make_g1_sonic_lora_config(name: str, repo_id: str) -> TrainConfig:
+    model = pi0_config.Pi0Config(
+        pi05=True,
+        action_dim=78,
+        action_horizon=40,
+        max_token_len=256,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+    )
+    return TrainConfig(
+        name=name,
+        model=model,
+        data=LeRobotG1SonicDataConfig(
+            repo_id=repo_id,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            reinit_mismatched_regexes=(
+                ".*action_in_proj.*",
+                ".*action_out_proj.*",
+            ),
+        ),
+        freeze_filter=model.get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=30_000,
+        num_workers=32,
+        batch_size=32,
+        fsdp_devices=1,
+        save_interval=5000,
+        keep_period=10000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=2e-4,
+            decay_steps=1_000_00,
+            decay_lr=5e-5,
+        )
+    )
+
+
+def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
+    return TrainConfig(
+        name=name,
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=78,
+            action_horizon=40,
+            max_token_len=256,
+        ),
+        data=LeRobotG1SonicDataConfig(
+            repo_id=repo_id,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            reinit_mismatched_regexes=(
+                ".*action_in_proj.*",
+                ".*action_out_proj.*",
+            ),
+        ),
+        num_train_steps=30_000,
+        num_workers=32,
+        batch_size=32,
+        fsdp_devices=8,
+        save_interval=5000,
+        keep_period=10000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=1e-4,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        ema_decay=0.999,
+    )
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -761,6 +935,68 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    #
+    # Fine-tuning G1 SONIC configs.
+    #
+    TrainConfig(
+        name="pi05_g1_sonic",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=78,
+            action_horizon=40,
+            max_token_len=256,
+        ),
+        data=LeRobotG1SonicDataConfig(
+            repo_id="g1_testset",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            reinit_mismatched_regexes=(
+                ".*action_in_proj.*",
+                ".*action_out_proj.*",
+            ),
+        ),
+        num_train_steps=20_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="pi05_g1_sonic_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=78,
+            action_horizon=40,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotG1SonicDataConfig(
+            repo_id="g1_testset",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            reinit_mismatched_regexes=(
+                ".*action_in_proj.*",
+                ".*action_out_proj.*",
+            ),
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=78,
+            action_horizon=40,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=20_000,
+        batch_size=32,
+    ),
+    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_movedoor", "MoveDoorMerge"),
+    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_collect_pillow", "CollectPillowMerge"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor", "MoveDoorMerge"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow", "CollectPillowMerge"),
     #
     # Fine-tuning Aloha configs.
     #
