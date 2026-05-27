@@ -36,6 +36,13 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
+G1_SONIC_IMAGE_KEYS = (
+    "base_0_rgb",
+    "chest_0_rgb",
+    "left_wrist_0_rgb",
+    "right_wrist_0_rgb",
+)
+
 
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
@@ -478,6 +485,7 @@ class LeRobotG1SonicDataConfig(DataConfigFactory):
                     {
                         "images": {
                             "ego_view": "observation.images.ego_view",
+                            "chest_view": "observation.images.chest_view",
                             "left_wrist": "observation.images.left_wrist",
                             "right_wrist": "observation.images.right_wrist",
                         },
@@ -534,10 +542,10 @@ def _load_task_instruction_variants(
     variants: dict[int, list[str]] = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            stripped_line = line.strip()
+            if not stripped_line:
                 continue
-            item = json.loads(line)
+            item = json.loads(stripped_line)
             variants.setdefault(int(item["task_index"]), []).append(str(item["instruction"]))
 
     return {task_index: tuple(instructions) for task_index, instructions in variants.items()}
@@ -662,6 +670,7 @@ def _make_g1_sonic_lora_config(name: str, repo_id: str) -> TrainConfig:
         max_token_len=256,
         paligemma_variant="gemma_2b_lora",
         action_expert_variant="gemma_300m_lora",
+        image_keys=G1_SONIC_IMAGE_KEYS,
     )
     return TrainConfig(
         name=name,
@@ -702,6 +711,7 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
             action_dim=78,
             action_horizon=40,
             max_token_len=256,
+            image_keys=G1_SONIC_IMAGE_KEYS,
         ),
         data=LeRobotG1SonicDataConfig(
             repo_id=repo_id,
@@ -945,6 +955,7 @@ _CONFIGS = [
             action_dim=78,
             action_horizon=40,
             max_token_len=256,
+            image_keys=G1_SONIC_IMAGE_KEYS,
         ),
         data=LeRobotG1SonicDataConfig(
             repo_id="g1_testset",
@@ -969,6 +980,7 @@ _CONFIGS = [
             max_token_len=256,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
+            image_keys=G1_SONIC_IMAGE_KEYS,
         ),
         data=LeRobotG1SonicDataConfig(
             repo_id="g1_testset",
@@ -988,15 +1000,18 @@ _CONFIGS = [
             max_token_len=256,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
+            image_keys=G1_SONIC_IMAGE_KEYS,
         ).get_freeze_filter(),
         ema_decay=None,
         num_train_steps=20_000,
         batch_size=32,
     ),
     _make_g1_sonic_lora_config("pi05_g1_sonic_lora_movedoor", "MoveDoorMerge"),
-    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_collect_pillow", "CollectPillowMerge"),
+    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_collect_pillow", "CollectPillowMerge4Cam"),
+    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_collect_pillow_4cam", "CollectPillowMerge4Cam"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor", "MoveDoorMerge"),
-    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow", "CollectPillowMerge"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow", "CollectPillowMerge4Cam"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow_4cam", "CollectPillowMerge4Cam"),
     #
     # Fine-tuning Aloha configs.
     #

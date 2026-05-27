@@ -20,8 +20,8 @@ class G1SonicInputs(transforms.DataTransformFn):
     """Inputs for Unitree G1 SONIC VLA datasets.
 
     Expected training data after repacking:
-    - images/ego_view: RGB image.
-    - images/left_wrist, images/right_wrist: optional RGB wrist images.
+    - images/ego_view, images/chest_view: RGB body-mounted images.
+    - images/left_wrist, images/right_wrist: RGB wrist images.
     - observation/state: 43-D G1 joint configuration.
     - observation/projected_gravity: 3-D projected gravity vector.
     - action/motion_token: [T, 64] SONIC latent action chunk.
@@ -32,25 +32,24 @@ class G1SonicInputs(transforms.DataTransformFn):
 
     def __call__(self, data: dict) -> dict:
         in_images = data["images"]
-        base_image = _parse_image(in_images["ego_view"])
-
         image_sources = {
             "base_0_rgb": "ego_view",
+            "chest_0_rgb": "chest_view",
             "left_wrist_0_rgb": "left_wrist",
             "right_wrist_0_rgb": "right_wrist",
         }
+        missing_images = [source for source in image_sources.values() if source not in in_images]
+        if missing_images:
+            raise ValueError(f"Missing required G1 SONIC camera views: {missing_images}")
+
         images = {}
         image_masks = {}
         for dest, source in image_sources.items():
-            if source in in_images:
-                image = _parse_image(in_images[source])
-                if source == "right_wrist":
-                    image = np.rot90(image, 2)
-                images[dest] = image
-                image_masks[dest] = np.True_
-            else:
-                images[dest] = np.zeros_like(base_image)
-                image_masks[dest] = np.False_
+            image = _parse_image(in_images[source])
+            if source == "right_wrist":
+                image = np.rot90(image, 2)
+            images[dest] = image
+            image_masks[dest] = np.True_
 
         observation = data["observation"]
         state = np.concatenate(

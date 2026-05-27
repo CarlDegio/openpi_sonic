@@ -9,8 +9,8 @@ export http_proxy=http://127.0.0.1:7890
 export https_proxy=http://127.0.0.1:7890
 # export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
-python scripts/train.py pi05_g1_sonic_full_movedoor \
---exp-name movedoor_full \
+python scripts/train.py pi05_g1_sonic_full_collect_pillow_4cam \
+--exp-name collect_pillow_full \
 --num-train-steps 30000 \
 --save-interval 5000 \
 --keep-period 15000 \
