@@ -695,10 +695,10 @@ def _make_g1_sonic_lora_config(name: str, repo_id: str) -> TrainConfig:
         save_interval=5000,
         keep_period=10000,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=500,
-            peak_lr=2e-4,
-            decay_steps=1_000_00,
-            decay_lr=5e-5,
+            warmup_steps=1000,
+            peak_lr=1e-4,
+            decay_steps=30000,
+            decay_lr=1e-5,
         )
     )
 
@@ -731,12 +731,12 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         save_interval=5000,
         keep_period=10000,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
+            warmup_steps=1000,
             peak_lr=1e-4,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
+            decay_steps=25000,
+            decay_lr=1e-5,
         ),
-        ema_decay=0.999,
+        ema_decay=0.99,
     )
 
 
@@ -1012,6 +1012,7 @@ _CONFIGS = [
     _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor", "MoveDoorMerge"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow", "CollectPillowMerge4Cam"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow_4cam", "CollectPillowMerge4Cam"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor_4cam", "MoveDoorMerge4Cam"),
     #
     # Fine-tuning Aloha configs.
     #

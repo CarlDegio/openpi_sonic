@@ -36,12 +36,12 @@ PLOT_GROUPS = (
 class Args:
     """Arguments for G1 SONIC offline policy evaluation."""
 
-    # Local LeRobot dataset path, e.g. /mnt/g1_training_dataset/MoveDoorMerge.
-    dataset_path: pathlib.Path = pathlib.Path("/mnt/g1_training_dataset/MoveDoorMerge")
+    # Local LeRobot dataset path, e.g. /mnt/g1_training_dataset/CollectPillowMerge4Cam.
+    dataset_path: pathlib.Path = pathlib.Path("/mnt/g1_training_dataset/CollectPillowMerge4Cam")
     # Episode index inside the LeRobot dataset.
     episode_index: int = 0
     # Directory for plots, metrics, and optional arrays.
-    output_dir: pathlib.Path = pathlib.Path("outputs/movedoor_eval")
+    output_dir: pathlib.Path = pathlib.Path("outputs/collect_pillow_4cam_eval")
 
     # Policy server host.
     host: str = "localhost"
@@ -51,11 +51,13 @@ class Args:
     connect_timeout_s: float = 300.0
 
     # If true, this script starts scripts/serve_policy.py before evaluating.
-    start_server: bool = False
+    start_server: bool = True
     # Config passed to scripts/serve_policy.py when --start-server is enabled.
-    checkpoint_config: str = "pi05_g1_sonic_lora_movedoor"
+    checkpoint_config: str = "pi05_g1_sonic_full_collect_pillow_4cam"
     # Checkpoint dir passed to scripts/serve_policy.py when --start-server is enabled.
-    checkpoint_dir: pathlib.Path = pathlib.Path("checkpoints/pi05_g1_sonic_lora_movedoor/movedoor_lora/29999")
+    checkpoint_dir: pathlib.Path = pathlib.Path(
+        "checkpoints/pi05_g1_sonic_full_collect_pillow_4cam/collect_pillow_full/29999"
+    )
 
     # Number of predicted actions per policy call. Must match the trained model horizon.
     chunk_size: int = 40
@@ -162,6 +164,7 @@ def _make_observation(sample: dict[str, Any], prompt: str | None) -> dict[str, A
     obs: dict[str, Any] = {
         "images": {
             "ego_view": sample["observation.images.ego_view"],
+            "chest_view": sample["observation.images.chest_view"],
             "left_wrist": sample["observation.images.left_wrist"],
             "right_wrist": sample["observation.images.right_wrist"],
         },
