@@ -5,6 +5,12 @@ import numpy as np
 
 from openpi import transforms
 
+SONIC_REAL_ACTION_DIM = 78
+SONIC_MOTION_TOKEN_DIM = 64
+SONIC_HAND_DIM = 7
+PI05_ACTION_DIM = 32
+SONIC_PACK_FACTOR = 3
+
 
 def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
@@ -100,4 +106,68 @@ class G1SonicOutputs(transforms.DataTransformFn):
             "motion_token": actions[..., :64],
             "left_hand_joints": actions[..., 64:71],
             "right_hand_joints": actions[..., 71:78],
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class PackG1SonicPi05Actions(transforms.DataTransformFn):
+    """Pack normalized SONIC actions into pi0.5's native 32-D action tokens."""
+
+    def __call__(self, data: dict) -> dict:
+        if "actions" not in data:
+            return data
+
+        actions = np.asarray(data["actions"])
+        if actions.shape[-1] != SONIC_REAL_ACTION_DIM:
+            raise ValueError(f"G1 SONIC actions must have last dim {SONIC_REAL_ACTION_DIM}, got {actions.shape}")
+
+        motion_token = actions[..., :SONIC_MOTION_TOKEN_DIM]
+        left_hand = actions[..., SONIC_MOTION_TOKEN_DIM : SONIC_MOTION_TOKEN_DIM + SONIC_HAND_DIM]
+        right_hand = actions[..., SONIC_MOTION_TOKEN_DIM + SONIC_HAND_DIM : SONIC_REAL_ACTION_DIM]
+
+        packed_shape = (*actions.shape[:-2], actions.shape[-2] * SONIC_PACK_FACTOR, PI05_ACTION_DIM)
+        packed = np.zeros(packed_shape, dtype=actions.dtype)
+        packed[..., 0::SONIC_PACK_FACTOR, :] = motion_token[..., :PI05_ACTION_DIM]
+        packed[..., 1::SONIC_PACK_FACTOR, :] = motion_token[..., PI05_ACTION_DIM:SONIC_MOTION_TOKEN_DIM]
+        packed[..., 2::SONIC_PACK_FACTOR, :SONIC_HAND_DIM] = left_hand
+        packed[..., 2::SONIC_PACK_FACTOR, SONIC_HAND_DIM : 2 * SONIC_HAND_DIM] = right_hand
+
+        action_loss_mask = np.ones(packed_shape, dtype=bool)
+        action_loss_mask[..., 2::SONIC_PACK_FACTOR, 2 * SONIC_HAND_DIM :] = False
+
+        return {
+            **data,
+            "actions": packed,
+            "action_loss_mask": action_loss_mask,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class UnpackG1SonicPi05Actions(transforms.DataTransformFn):
+    """Unpack pi0.5 32-D action tokens back into normalized SONIC actions."""
+
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["actions"])
+        if actions.shape[-1] != PI05_ACTION_DIM:
+            raise ValueError(f"Packed G1 SONIC actions must have last dim {PI05_ACTION_DIM}, got {actions.shape}")
+        if actions.shape[-2] % SONIC_PACK_FACTOR != 0:
+            raise ValueError(
+                f"Packed G1 SONIC action horizon must be divisible by {SONIC_PACK_FACTOR}, got {actions.shape}"
+            )
+
+        horizon = actions.shape[-2] // SONIC_PACK_FACTOR
+        unpacked_shape = (*actions.shape[:-2], horizon, SONIC_REAL_ACTION_DIM)
+        unpacked = np.zeros(unpacked_shape, dtype=actions.dtype)
+        unpacked[..., :PI05_ACTION_DIM] = actions[..., 0::SONIC_PACK_FACTOR, :]
+        unpacked[..., PI05_ACTION_DIM:SONIC_MOTION_TOKEN_DIM] = actions[..., 1::SONIC_PACK_FACTOR, :]
+        unpacked[..., SONIC_MOTION_TOKEN_DIM : SONIC_MOTION_TOKEN_DIM + SONIC_HAND_DIM] = actions[
+            ..., 2::SONIC_PACK_FACTOR, :SONIC_HAND_DIM
+        ]
+        unpacked[..., SONIC_MOTION_TOKEN_DIM + SONIC_HAND_DIM : SONIC_REAL_ACTION_DIM] = actions[
+            ..., 2::SONIC_PACK_FACTOR, SONIC_HAND_DIM : 2 * SONIC_HAND_DIM
+        ]
+
+        return {
+            **data,
+            "actions": unpacked,
         }

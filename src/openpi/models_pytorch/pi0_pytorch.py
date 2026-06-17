@@ -373,7 +373,12 @@ class PI0Pytorch(nn.Module):
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        sq_error = F.mse_loss(u_t, v_t, reduction="none")
+        if observation.action_loss_mask is not None:
+            action_loss_mask = observation.action_loss_mask.to(device=sq_error.device, dtype=sq_error.dtype)
+            denom = torch.clamp(action_loss_mask.sum(dim=-1), min=1.0)
+            return (sq_error * action_loss_mask).sum(dim=-1) / denom
+        return sq_error
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:

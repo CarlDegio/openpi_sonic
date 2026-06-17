@@ -42,6 +42,9 @@ G1_SONIC_IMAGE_KEYS = (
     "left_wrist_0_rgb",
     "right_wrist_0_rgb",
 )
+G1_SONIC_STATE_DIM = 46
+G1_SONIC_RAW_ACTION_HORIZON = 40
+G1_SONIC_PACKED_ACTION_HORIZON = G1_SONIC_RAW_ACTION_HORIZON * g1_sonic_policy.SONIC_PACK_FACTOR
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,6 +99,9 @@ class DataConfig:
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
+    # If set, this overrides the model action horizon when reading raw action sequences from the dataset.
+    # This is useful when a data transform expands one real action step into multiple model action tokens.
+    action_sequence_horizon: int | None = None
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
@@ -512,6 +518,7 @@ class LeRobotG1SonicDataConfig(DataConfigFactory):
         "teleop.left_hand_joints",
         "teleop.right_hand_joints",
     )
+    action_sequence_horizon: int | None = G1_SONIC_RAW_ACTION_HORIZON
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -520,7 +527,10 @@ class LeRobotG1SonicDataConfig(DataConfigFactory):
             inputs=[g1_sonic_policy.G1SonicInputs(task_instruction_variants=task_instruction_variants)],
             outputs=[g1_sonic_policy.G1SonicOutputs()],
         )
-        model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = ModelTransformFactory()(model_config).push(
+            inputs=[g1_sonic_policy.PackG1SonicPi05Actions()],
+            outputs=[g1_sonic_policy.UnpackG1SonicPi05Actions()],
+        )
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -528,6 +538,7 @@ class LeRobotG1SonicDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
+            action_sequence_horizon=self.action_sequence_horizon,
         )
 
 
@@ -665,8 +676,9 @@ class TrainConfig:
 def _make_g1_sonic_lora_config(name: str, repo_id: str) -> TrainConfig:
     model = pi0_config.Pi0Config(
         pi05=True,
-        action_dim=78,
-        action_horizon=40,
+        action_dim=g1_sonic_policy.PI05_ACTION_DIM,
+        action_horizon=G1_SONIC_PACKED_ACTION_HORIZON,
+        state_dim=G1_SONIC_STATE_DIM,
         max_token_len=256,
         paligemma_variant="gemma_2b_lora",
         action_expert_variant="gemma_300m_lora",
@@ -679,13 +691,7 @@ def _make_g1_sonic_lora_config(name: str, repo_id: str) -> TrainConfig:
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params",
-            reinit_mismatched_regexes=(
-                ".*action_in_proj.*",
-                ".*action_out_proj.*",
-            ),
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         freeze_filter=model.get_freeze_filter(),
         ema_decay=None,
         num_train_steps=30_000,
@@ -699,7 +705,7 @@ def _make_g1_sonic_lora_config(name: str, repo_id: str) -> TrainConfig:
             peak_lr=1e-4,
             decay_steps=30000,
             decay_lr=1e-5,
-        )
+        ),
     )
 
 
@@ -708,8 +714,9 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         name=name,
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=78,
-            action_horizon=40,
+            action_dim=g1_sonic_policy.PI05_ACTION_DIM,
+            action_horizon=G1_SONIC_PACKED_ACTION_HORIZON,
+            state_dim=G1_SONIC_STATE_DIM,
             max_token_len=256,
             image_keys=G1_SONIC_IMAGE_KEYS,
         ),
@@ -717,13 +724,7 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params",
-            reinit_mismatched_regexes=(
-                ".*action_in_proj.*",
-                ".*action_out_proj.*",
-            ),
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
         num_workers=32,
         batch_size=32,
@@ -952,8 +953,9 @@ _CONFIGS = [
         name="pi05_g1_sonic",
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=78,
-            action_horizon=40,
+            action_dim=g1_sonic_policy.PI05_ACTION_DIM,
+            action_horizon=G1_SONIC_PACKED_ACTION_HORIZON,
+            state_dim=G1_SONIC_STATE_DIM,
             max_token_len=256,
             image_keys=G1_SONIC_IMAGE_KEYS,
         ),
@@ -961,13 +963,7 @@ _CONFIGS = [
             repo_id="g1_testset",
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params",
-            reinit_mismatched_regexes=(
-                ".*action_in_proj.*",
-                ".*action_out_proj.*",
-            ),
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=20_000,
         batch_size=32,
     ),
@@ -975,8 +971,9 @@ _CONFIGS = [
         name="pi05_g1_sonic_lora",
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=78,
-            action_horizon=40,
+            action_dim=g1_sonic_policy.PI05_ACTION_DIM,
+            action_horizon=G1_SONIC_PACKED_ACTION_HORIZON,
+            state_dim=G1_SONIC_STATE_DIM,
             max_token_len=256,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
@@ -986,17 +983,12 @@ _CONFIGS = [
             repo_id="g1_testset",
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.ShapeAwareCheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params",
-            reinit_mismatched_regexes=(
-                ".*action_in_proj.*",
-                ".*action_out_proj.*",
-            ),
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=78,
-            action_horizon=40,
+            action_dim=g1_sonic_policy.PI05_ACTION_DIM,
+            action_horizon=G1_SONIC_PACKED_ACTION_HORIZON,
+            state_dim=G1_SONIC_STATE_DIM,
             max_token_len=256,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",

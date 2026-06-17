@@ -214,7 +214,12 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        sq_error = jnp.square(v_t - u_t)
+        if observation.action_loss_mask is not None:
+            action_loss_mask = observation.action_loss_mask.astype(sq_error.dtype)
+            denom = jnp.maximum(jnp.sum(action_loss_mask, axis=-1), 1.0)
+            return jnp.sum(sq_error * action_loss_mask, axis=-1) / denom
+        return jnp.mean(sq_error, axis=-1)
 
     @override
     def sample_actions(
