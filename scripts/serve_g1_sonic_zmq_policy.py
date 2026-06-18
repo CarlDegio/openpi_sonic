@@ -164,25 +164,17 @@ def gr00t_observation_to_openpi(observation: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(video, dict):
         raise ValueError("Missing observation['video']")
 
-    required_video_keys = ("ego_view", "chest_view", "left_wrist")
+    required_video_keys = ("ego_view", "chest_view", "left_wrist", "right_wrist")
     missing_video_keys = [key for key in required_video_keys if key not in video]
     if missing_video_keys:
         raise ValueError(f"Missing required observation['video'] keys: {missing_video_keys}")
-    if "wrist_view" not in video and "right_wrist" not in video:
-        raise ValueError("Missing observation['video']['wrist_view'] or observation['video']['right_wrist']")
 
     images: dict[str, np.ndarray] = {
         "ego_view": np.asarray(_squeeze_bt(video["ego_view"], name="video.ego_view")),
         "chest_view": np.asarray(_squeeze_bt(video["chest_view"], name="video.chest_view")),
         "left_wrist": np.asarray(_squeeze_bt(video["left_wrist"], name="video.left_wrist")),
+        "right_wrist": np.asarray(_squeeze_bt(video["right_wrist"], name="video.right_wrist")),
     }
-
-    if "wrist_view" in video:
-        # OpenPI's G1SonicInputs performs the trained right-wrist 180 degree
-        # rotation.  Do not rotate here.
-        images["right_wrist"] = np.asarray(_squeeze_bt(video["wrist_view"], name="video.wrist_view"))
-    elif "right_wrist" in video:
-        images["right_wrist"] = np.asarray(_squeeze_bt(video["right_wrist"], name="video.right_wrist"))
 
     if "q" not in observation:
         raise ValueError("Missing observation['q']")
