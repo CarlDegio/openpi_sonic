@@ -15,6 +15,7 @@ import socket
 import time
 from typing import Any
 
+import cv2
 import msgpack
 import numpy as np
 import tyro
@@ -121,6 +122,38 @@ class Gr00tMsgpack:
         return msgpack.unpackb(data, object_hook=cls.decode, raw=False)
 
 
+JPEG_VIDEO_MARKER = "__opencv_jpeg_rgb__"
+
+
+def _decode_jpeg_rgb_video(value: Any, *, name: str) -> Any:
+    if not isinstance(value, dict) or not value.get(JPEG_VIDEO_MARKER):
+        return value
+
+    encoded = value.get("data")
+    if not isinstance(encoded, bytes | bytearray):
+        raise ValueError(f"{name} JPEG payload must contain bytes in 'data'")
+
+    image_bgr = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise ValueError(f"cv2.imdecode failed for {name}")
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    shape = tuple(value.get("shape", image_rgb.shape))
+    dtype = np.dtype(value.get("dtype", image_rgb.dtype))
+    image_rgb = image_rgb.astype(dtype, copy=False)
+
+    if len(shape) == 5 and shape[0] == 1 and shape[1] == 1:
+        expected = shape[2:]
+        if image_rgb.shape != expected:
+            raise ValueError(f"{name} decoded shape {image_rgb.shape} does not match {expected}")
+        return image_rgb[np.newaxis, np.newaxis]
+    if len(shape) == 3:
+        if image_rgb.shape != shape:
+            raise ValueError(f"{name} decoded shape {image_rgb.shape} does not match {shape}")
+        return image_rgb
+    raise ValueError(f"{name} unsupported JPEG video shape metadata: {shape}")
+
+
 def _squeeze_bt(value: Any, *, name: str) -> np.ndarray:
     array = np.asarray(value)
     if array.ndim >= 2 and array.shape[0] == 1 and array.shape[1] == 1:
@@ -170,10 +203,30 @@ def gr00t_observation_to_openpi(observation: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Missing required observation['video'] keys: {missing_video_keys}")
 
     images: dict[str, np.ndarray] = {
-        "ego_view": np.asarray(_squeeze_bt(video["ego_view"], name="video.ego_view")),
-        "chest_view": np.asarray(_squeeze_bt(video["chest_view"], name="video.chest_view")),
-        "left_wrist": np.asarray(_squeeze_bt(video["left_wrist"], name="video.left_wrist")),
-        "right_wrist": np.asarray(_squeeze_bt(video["right_wrist"], name="video.right_wrist")),
+        "ego_view": np.asarray(
+            _squeeze_bt(
+                _decode_jpeg_rgb_video(video["ego_view"], name="video.ego_view"),
+                name="video.ego_view",
+            )
+        ),
+        "chest_view": np.asarray(
+            _squeeze_bt(
+                _decode_jpeg_rgb_video(video["chest_view"], name="video.chest_view"),
+                name="video.chest_view",
+            )
+        ),
+        "left_wrist": np.asarray(
+            _squeeze_bt(
+                _decode_jpeg_rgb_video(video["left_wrist"], name="video.left_wrist"),
+                name="video.left_wrist",
+            )
+        ),
+        "right_wrist": np.asarray(
+            _squeeze_bt(
+                _decode_jpeg_rgb_video(video["right_wrist"], name="video.right_wrist"),
+                name="video.right_wrist",
+            )
+        ),
     }
 
     if "q" not in observation:
