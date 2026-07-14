@@ -709,7 +709,7 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=78,
-            action_horizon=40,
+            action_horizon=70,
             max_token_len=256,
             image_keys=G1_SONIC_IMAGE_KEYS,
         ),
@@ -1006,13 +1006,11 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=32,
     ),
-    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_movedoor", "MoveDoorMerge"),
-    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_collect_pillow", "CollectPillowMerge4Cam"),
-    _make_g1_sonic_lora_config("pi05_g1_sonic_lora_collect_pillow_4cam", "CollectPillowMerge4Cam"),
-    _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor", "MoveDoorMerge"),
-    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow", "CollectPillowMerge4Cam"),
-    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pillow_4cam", "CollectPillowMerge4Cam"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor_4cam", "MoveDoorMerge4Cam"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_clean_desk", "CleanDeskMerge"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk", "WalkCleanDesk"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk_mix", "WalkCleanDesk_mix_CleanDesk"),
+    
     #
     # Fine-tuning Aloha configs.
     #
