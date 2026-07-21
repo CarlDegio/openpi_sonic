@@ -26,6 +26,7 @@ Example:
     python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi05_droid --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi05_droid_pytorch
 """
 
+import dataclasses
 import json
 import os
 import pathlib
@@ -419,6 +420,58 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
     print(utils.array_tree_to_info(metadata))
 
 
+_TORCH_DTYPES = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+
+def _validate_exact_fp32_values(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
+    model_state = model.state_dict()
+    errors = []
+    for key, source in state_dict.items():
+        if not source.is_floating_point():
+            continue
+        destination = model_state.get(key)
+        if destination is None:
+            errors.append(f"{key}: destination key is missing")
+            continue
+        if source.shape != destination.shape:
+            errors.append(f"{key}: source_shape={tuple(source.shape)} destination_shape={tuple(destination.shape)}")
+            continue
+        if source.dtype != torch.float32 or destination.dtype != torch.float32:
+            errors.append(f"{key}: source_dtype={source.dtype} destination_dtype={destination.dtype}")
+            continue
+        if not torch.equal(source, destination):
+            max_abs_diff = torch.max(torch.abs(source - destination)).item()
+            errors.append(f"{key}: max_abs_diff={max_abs_diff}")
+    if errors:
+        raise RuntimeError("FP32 conversion changed mapped values:\n" + "\n".join(errors))
+
+
+def _create_converted_model(
+    model_config: openpi.models.pi0_config.Pi0Config,
+    precision: str,
+    state_dict: dict[str, torch.Tensor],
+) -> torch.nn.Module:
+    target_dtype = _TORCH_DTYPES.get(precision)
+    if target_dtype is None:
+        raise ValueError(f"Invalid precision: {precision}")
+
+    conversion_config = dataclasses.replace(
+        model_config,
+        dtype=precision,
+        pytorch_compile_mode=None,
+    )
+    model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(conversion_config)
+    model.load_state_dict(state_dict, strict=False)
+
+    if precision == "float32":
+        _validate_exact_fp32_values(model, state_dict)
+
+    return model.to(target_dtype)
+
+
 def convert_pi0_checkpoint(
     checkpoint_dir: str, precision: str, output_path: str, model_config: openpi.models.pi0_config.Pi0Config
 ):
@@ -510,21 +563,11 @@ def convert_pi0_checkpoint(
         expert_params, action_expert_config, num_expert=1, checkpoint_dir=checkpoint_dir, pi05=model_config.pi05
     )
 
-    # Instantiate model
-    pi0_model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_config)
-
     # Combine all parameters (no prefix needed for our model structure)
     all_params = {**paligemma_params, **gemma_params, **projection_params}
 
-    # Load state dict
-    pi0_model.load_state_dict(all_params, strict=False)
-
-    if precision == "float32":
-        pi0_model = pi0_model.to(torch.float32)
-    elif precision == "bfloat16":
-        pi0_model = pi0_model.to(torch.bfloat16)
-    else:
-        raise ValueError(f"Invalid precision: {precision}")
+    # Construct at the requested dtype before copying values into parameters.
+    pi0_model = _create_converted_model(model_config, precision, all_params)
 
     # Save the converted model using safetensors
     os.makedirs(output_path, exist_ok=True)
