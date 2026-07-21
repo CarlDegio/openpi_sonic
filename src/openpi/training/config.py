@@ -589,7 +589,7 @@ class TrainConfig:
     pytorch_weight_path: str | None = None
 
     # Precision for PyTorch training.
-    pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
+    pytorch_training_precision: Literal["bfloat16", "float32"] = "float32"
 
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
@@ -733,7 +733,7 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
             peak_lr=1e-4,
-            decay_steps=25000,
+            decay_steps=40000,
             decay_lr=1e-5,
         ),
         ema_decay=0.99,
