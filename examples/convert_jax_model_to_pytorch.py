@@ -37,6 +37,7 @@ from flax.nnx import traversals
 import numpy as np
 import orbax.checkpoint as ocp
 import safetensors
+from safetensors import safe_open
 import torch
 import tyro
 
@@ -426,6 +427,49 @@ _TORCH_DTYPES = {
 }
 
 
+def _storage_signature(tensor: torch.Tensor) -> tuple:
+    storage = tensor.untyped_storage()
+    return (
+        storage.data_ptr(),
+        storage.nbytes(),
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+    )
+
+
+def _validate_state_dict_coverage(
+    model: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    incompatible_keys,
+) -> None:
+    model_state = model.state_dict()
+    loaded_storage = {_storage_signature(model_state[key]) for key in state_dict if key in model_state}
+    unexplained_missing = [
+        key
+        for key in incompatible_keys.missing_keys
+        if key not in model_state or _storage_signature(model_state[key]) not in loaded_storage
+    ]
+    if incompatible_keys.unexpected_keys or unexplained_missing:
+        raise RuntimeError(
+            "Converted state dict does not cover the model: "
+            f"missing_keys={sorted(unexplained_missing)}, "
+            f"unexpected_keys={sorted(incompatible_keys.unexpected_keys)}"
+        )
+
+
+def _validate_fp32_safetensors(path: pathlib.Path | str) -> None:
+    invalid = {}
+    with safe_open(path, framework="pt", device="cpu") as tensors:
+        for key in tensors.keys():  # noqa: SIM118 - safe_open is not iterable.
+            dtype = tensors.get_slice(key).get_dtype()
+            if (dtype.startswith("F") or dtype == "BF16") and dtype != "F32":
+                invalid[key] = dtype
+    if invalid:
+        details = ", ".join(f"{key}={dtype}" for key, dtype in sorted(invalid.items()))
+        raise RuntimeError(f"Expected an FP32 safetensors file, found non-FP32 floating tensors: {details}")
+
+
 def _validate_exact_fp32_values(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
     model_state = model.state_dict()
     errors = []
@@ -464,9 +508,10 @@ def _create_converted_model(
         pytorch_compile_mode=None,
     )
     model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(conversion_config)
-    model.load_state_dict(state_dict, strict=False)
+    incompatible_keys = model.load_state_dict(state_dict, strict=False)
 
     if precision == "float32":
+        _validate_state_dict_coverage(model, state_dict, incompatible_keys)
         _validate_exact_fp32_values(model, state_dict)
 
     return model.to(target_dtype)
@@ -573,7 +618,10 @@ def convert_pi0_checkpoint(
     os.makedirs(output_path, exist_ok=True)
 
     # Save model weights as SafeTensors using save_model to handle tied weights
-    safetensors.torch.save_model(pi0_model, os.path.join(output_path, "model.safetensors"))
+    model_path = pathlib.Path(output_path) / "model.safetensors"
+    safetensors.torch.save_model(pi0_model, model_path)
+    if precision == "float32":
+        _validate_fp32_safetensors(model_path)
 
     # Copy assets folder if it exists
     assets_source = pathlib.Path(checkpoint_dir).parent / "assets"

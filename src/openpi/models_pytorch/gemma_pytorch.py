@@ -8,6 +8,25 @@ from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
 
+def _drop_legacy_expert_lm_head(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+):
+    del module, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    state_dict.pop(f"{prefix}gemma_expert.lm_head.weight", None)
+
+
+def _remove_orphaned_expert_lm_head(module: nn.Module) -> None:
+    module.gemma_expert.lm_head = None
+    module.register_load_state_dict_pre_hook(_drop_legacy_expert_lm_head)
+
+
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(
         self,
@@ -56,6 +75,8 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)
         self.gemma_expert = GemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None
+        if precision == "float32":
+            _remove_orphaned_expert_lm_head(self)
 
         self.to_bfloat16_for_selected_params(precision)
 

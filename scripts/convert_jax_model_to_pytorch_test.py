@@ -1,6 +1,7 @@
 import dataclasses
 
 import pytest
+from safetensors.torch import save_file
 import torch
 
 from examples import convert_jax_model_to_pytorch as converter
@@ -89,3 +90,53 @@ def test_float16_remains_unsupported(monkeypatch):
 
     with pytest.raises(ValueError, match="Invalid precision: float16"):
         converter._create_converted_model(_FakeConfig(), "float16", _source_state())
+
+
+class _TiedTinyModel(torch.nn.Module):
+    def __init__(self, config: _FakeConfig):
+        super().__init__()
+        dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[config.dtype]
+        self.weight = torch.nn.Parameter(torch.empty((1, 4), dtype=dtype))
+        self.alias = self.weight
+        self.config = config
+
+
+def test_unexpected_state_dict_key_is_rejected(monkeypatch):
+    monkeypatch.setattr(converter.openpi.models_pytorch.pi0_pytorch, "PI0Pytorch", _TinyModel)
+    source = {**_source_state(), "unexpected": torch.ones(1)}
+
+    with pytest.raises(RuntimeError, match=r"unexpected_keys=.*unexpected"):
+        converter._create_converted_model(_FakeConfig(), "float32", source)
+
+
+def test_missing_non_alias_parameter_is_rejected(monkeypatch):
+    monkeypatch.setattr(converter.openpi.models_pytorch.pi0_pytorch, "PI0Pytorch", _TinyModel)
+    source = {"weight": _source_state()["weight"]}
+
+    with pytest.raises(RuntimeError, match=r"missing_keys=.*bias"):
+        converter._create_converted_model(_FakeConfig(), "float32", source)
+
+
+def test_missing_tied_alias_is_accepted(monkeypatch):
+    monkeypatch.setattr(converter.openpi.models_pytorch.pi0_pytorch, "PI0Pytorch", _TiedTinyModel)
+    source = {"weight": _source_state()["weight"]}
+
+    model = converter._create_converted_model(_FakeConfig(), "float32", source)
+
+    assert torch.equal(model.alias, source["weight"])
+
+
+def test_fp32_safetensors_header_accepts_float32_and_integer_tensors(tmp_path):
+    path = tmp_path / "model.safetensors"
+    save_file({"weight": torch.ones(2), "index": torch.ones(1, dtype=torch.int64)}, path)
+
+    converter._validate_fp32_safetensors(path)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float64])
+def test_fp32_safetensors_header_rejects_non_fp32_float(tmp_path, dtype: torch.dtype):
+    path = tmp_path / "model.safetensors"
+    save_file({"weight": torch.ones(2, dtype=dtype)}, path)
+
+    with pytest.raises(RuntimeError, match=r"weight"):
+        converter._validate_fp32_safetensors(path)
