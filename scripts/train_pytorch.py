@@ -27,12 +27,14 @@ import dataclasses
 import gc
 import logging
 import os
+import pathlib
 import platform
 import shutil
 import time
 
 import jax
 import numpy as np
+from safetensors import safe_open
 import safetensors.torch
 import torch
 import torch.distributed as dist
@@ -146,6 +148,43 @@ def get_model_parameters(model):
     )
 
 
+def _validate_fp32_safetensors(path: pathlib.Path | str) -> None:
+    invalid = {}
+    with safe_open(path, framework="pt", device="cpu") as tensors:
+        for key in tensors.keys():  # noqa: SIM118 - safe_open is not iterable.
+            dtype = tensors.get_slice(key).get_dtype()
+            if (dtype.startswith("F") or dtype == "BF16") and dtype != "F32":
+                invalid[key] = dtype
+    if invalid:
+        details = ", ".join(f"{key}={dtype}" for key, dtype in sorted(invalid.items()))
+        raise RuntimeError(f"FP32 training requires an FP32 checkpoint; found: {details}")
+
+
+def _validate_fp32_model(model: torch.nn.Module) -> None:
+    model_to_check = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    invalid = []
+    for name, parameter in model_to_check.named_parameters():
+        if parameter.is_floating_point() and parameter.dtype != torch.float32:
+            invalid.append(f"parameter:{name}={parameter.dtype}")
+    for name, buffer in model_to_check.named_buffers():
+        if buffer.is_floating_point() and buffer.dtype != torch.float32:
+            invalid.append(f"buffer:{name}={buffer.dtype}")
+    if invalid:
+        raise RuntimeError("FP32 training found non-FP32 model state: " + ", ".join(sorted(invalid)))
+
+
+def _validate_fp32_training_state(
+    model: torch.nn.Module,
+    precision: str,
+    checkpoint_path: pathlib.Path | str | None = None,
+) -> None:
+    if precision != "float32":
+        return
+    if checkpoint_path is not None:
+        _validate_fp32_safetensors(checkpoint_path)
+    _validate_fp32_model(model)
+
+
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_config):
     """Save a checkpoint with model state, optimizer state, and metadata."""
     if not is_main:
@@ -194,7 +233,7 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config)
             wandb.log({"checkpoint_step": global_step}, step=global_step)
 
 
-def load_checkpoint(model, optimizer, checkpoint_dir, device):
+def load_checkpoint(model, optimizer, checkpoint_dir, device, *, precision: str):
     """Load the latest checkpoint and return the global step."""
     checkpoint_steps = [
         int(d.name)
@@ -221,7 +260,9 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
 
         if safetensors_path.exists():
             model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+            _validate_fp32_training_state(model, precision, safetensors_path)
             safetensors.torch.load_model(model_to_load, safetensors_path, device=str(device))
+            _validate_fp32_training_state(model, precision)
             logging.info("Loaded model state from safetensors format")
         else:
             raise FileNotFoundError(f"No model checkpoint found at {ckpt_dir}")
@@ -443,10 +484,13 @@ def train_loop(config: _config.TrainConfig):
         logging.info(f"Loading weights from: {config.pytorch_weight_path}")
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
+        _validate_fp32_training_state(model, config.pytorch_training_precision, model_path)
         safetensors.torch.load_model(
             (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path
         )
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
+
+    _validate_fp32_training_state(model, config.pytorch_training_precision)
 
     # Optimizer + learning rate schedule from config
     warmup_steps = config.lr_schedule.warmup_steps
@@ -466,7 +510,13 @@ def train_loop(config: _config.TrainConfig):
     # Load checkpoint if resuming
     global_step = 0
     if resuming:
-        global_step = load_checkpoint(model, optim, config.checkpoint_dir, device)
+        global_step = load_checkpoint(
+            model,
+            optim,
+            config.checkpoint_dir,
+            device,
+            precision=config.pytorch_training_precision,
+        )
         logging.info(f"Resumed training from step {global_step}")
 
     def lr_schedule(step: int):
