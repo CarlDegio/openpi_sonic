@@ -13,6 +13,14 @@ precision.
 The target workflow is full-FP32 PyTorch training initialized from pi0 or pi0.5
 JAX weights without conversion-induced rounding.
 
+The PyTorch action expert also currently constructs a tied language-model head,
+then removes the embedding to which that head was tied. The expert forward path
+always calls the decoder model directly and never uses this orphaned head. JAX
+therefore has no source tensor for it, but it remains as a large randomly
+initialized parameter in the FP32 PyTorch state dict. A strict conversion
+coverage check must remove this FP32-only artifact rather than bless it as a
+valid missing key.
+
 ## Goals
 
 - Preserve every mapped FP32 JAX parameter value exactly through PyTorch model
@@ -56,8 +64,12 @@ dict. In FP32 mode, every destination parameter is FP32 before the first copy,
 so there is no intermediate BF16 rounding. Disabling compilation avoids
 compiling an inference method for a model used only as a conversion container.
 
-BF16 conversion retains the existing behavior, including the final whole-model
-BF16 cast. Float16 retains the existing unsupported-precision error.
+BF16 conversion retains the existing behavior, including the action expert's
+legacy head and the final whole-model BF16 cast. In FP32 models only, the unused
+action-expert `lm_head` is removed. A narrowly scoped load-state pre-hook drops
+that one legacy key when an older FP32 PyTorch checkpoint is loaded, so existing
+FP32 checkpoints remain loadable. Float16 retains the existing
+unsupported-precision error.
 
 An alternative that always constructs an FP32 model was rejected because it
 would impose the FP32 peak-memory cost on BF16 conversions. Directly writing
@@ -71,7 +83,9 @@ and complicate tied-weight handling.
 2. Apply the existing JAX-to-PyTorch name and layout transformations.
 3. Construct a pi0 or pi0.5 PyTorch model using a copied config whose dtype is
    the requested output precision.
-4. Load the mapped tensors and validate the returned incompatible-key report.
+4. For FP32, remove the unused action-expert `lm_head`, load the mapped tensors,
+   and validate the returned incompatible-key report. BF16 keeps its current
+   permissive load behavior.
 5. In FP32 mode, compare every mapped floating tensor against the corresponding
    model tensor with exact equality.
 6. Apply the existing final output cast. For FP32 this is idempotent; for BF16
@@ -82,14 +96,19 @@ and complicate tied-weight handling.
 
 ## State-Dict Integrity Policy
 
-- Unexpected input keys are always fatal.
+- For lossless FP32 conversion, unexpected input keys are always fatal.
 - A missing model key is accepted only when it is a tied alias whose storage is
   demonstrably shared with a successfully loaded key.
 - Any missing non-aliased parameter is fatal, including parameters that the
-  current forward path does not use. The converter must not publish random
-  trainable state.
+  current forward path does not use. The unused action-expert `lm_head` is
+  removed from FP32 models before this validation, so the converter does not
+  publish random trainable state or add an exception to the coverage rule.
 - Validation errors identify every offending key rather than reporting only
   the first one.
+
+The coverage check is FP32-only. This preserves the exact BF16 conversion path,
+whose legacy action-expert head has no JAX counterpart. Tightening BF16 state
+coverage is outside this change.
 
 For FP32 output, each mapped floating source tensor must satisfy all of the
 following after model loading:
@@ -153,6 +172,9 @@ Converter tests cover:
 - BF16 output retains the current final dtype behavior.
 - Unexpected keys and missing non-aliased parameters are rejected.
 - A mechanically verified tied alias is accepted.
+- FP32 models remove the unused action-expert head and accept that one key from
+  legacy FP32 checkpoints through the compatibility hook.
+- BF16 models retain the legacy head and existing conversion behavior.
 - FP32 equality errors report the tensor name and maximum absolute difference.
 - The saved-header validator accepts FP32 plus integer/boolean tensors and
   rejects BF16/FP16 tensors.
@@ -180,5 +202,6 @@ per-key equality validation during conversion.
 - pi0 and pi0.5 use the same corrected conversion path.
 - FP32 training rejects non-FP32 source checkpoints and non-FP32 in-memory
   model state before optimization.
-- BF16 conversion and BF16 training behavior remain unchanged.
+- BF16 conversion and BF16 training behavior remain unchanged, including the
+  existing expert-head state layout.
 - JAX code and configuration have no diff.
