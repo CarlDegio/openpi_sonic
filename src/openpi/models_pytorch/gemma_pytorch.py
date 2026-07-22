@@ -27,6 +27,20 @@ def _remove_orphaned_expert_lm_head(module: nn.Module) -> None:
     module.register_load_state_dict_pre_hook(_drop_legacy_expert_lm_head)
 
 
+def _sdpa_attention(query, key, value, attention_mask, scaling):
+    if attention_mask is not None and attention_mask.dtype != query.dtype:
+        attention_mask = attention_mask.to(query.dtype)
+    output = torch.nn.functional.scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        scale=scaling,
+        enable_gqa=True,
+    )
+    return output.transpose(1, 2).contiguous()
+
+
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(
         self,
@@ -215,11 +229,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                 )
 
                 batch_size = query_states.shape[0]
+                num_heads = query_states.shape[1]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
 
-                # Attention computation
-                att_output, _ = modeling_gemma.eager_attention_forward(
-                    self.paligemma.language_model.layers[layer_idx].self_attn,
+                att_output = _sdpa_attention(
                     query_states,
                     key_states,
                     value_states,
@@ -228,7 +241,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                 )
                 # Get head_dim from the current layer, not from the model
                 head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim
-                att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
+                att_output = att_output.reshape(batch_size, -1, num_heads * head_dim)
 
                 # Process layer outputs
                 outputs_embeds = []

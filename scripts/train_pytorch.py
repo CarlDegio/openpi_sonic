@@ -29,6 +29,7 @@ import logging
 import os
 import pathlib
 import platform
+import re
 import shutil
 import time
 
@@ -183,6 +184,72 @@ def _validate_fp32_training_state(
     if checkpoint_path is not None:
         _validate_fp32_safetensors(checkpoint_path)
     _validate_fp32_model(model)
+
+
+def _storage_signature(tensor: torch.Tensor) -> tuple:
+    storage = tensor.untyped_storage()
+    return (
+        storage.data_ptr(),
+        storage.nbytes(),
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+    )
+
+
+def _load_initial_weights(model: torch.nn.Module, checkpoint_path, weight_loader) -> None:
+    model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    model_state = model_to_load.state_dict()
+    checkpoint_state = safetensors.torch.load_file(checkpoint_path, device="cpu")
+    reinit_patterns = [re.compile(pattern) for pattern in getattr(weight_loader, "reinit_mismatched_regexes", ())]
+
+    def should_reinit(key: str) -> bool:
+        return any(pattern.fullmatch(key) for pattern in reinit_patterns)
+
+    unexpected_keys = sorted(set(checkpoint_state) - set(model_state))
+    if unexpected_keys:
+        raise RuntimeError(f"Initial checkpoint has unexpected_keys={unexpected_keys}")
+
+    compatible_state = {}
+    mismatches = []
+    for key, value in checkpoint_state.items():
+        target = model_state[key]
+        if value.shape == target.shape:
+            compatible_state[key] = value
+        elif should_reinit(key):
+            logging.info(
+                "Keeping initialized parameter for shape-mismatched checkpoint key %s: checkpoint=%s model=%s",
+                key,
+                tuple(value.shape),
+                tuple(target.shape),
+            )
+        else:
+            mismatches.append(f"{key}: checkpoint={tuple(value.shape)} model={tuple(target.shape)}")
+
+    if mismatches:
+        raise RuntimeError("Initial checkpoint has unapproved shape mismatches: " + ", ".join(sorted(mismatches)))
+
+    loaded_storage = {_storage_signature(model_state[key]) for key in compatible_state}
+    unexplained_missing = sorted(
+        key
+        for key in model_state
+        if key not in compatible_state
+        if not should_reinit(key) and _storage_signature(model_state[key]) not in loaded_storage
+    )
+    if unexplained_missing:
+        raise RuntimeError(
+            "Initial checkpoint does not cover the model: "
+            f"missing_keys={unexplained_missing}, unexpected_keys=[]"
+        )
+
+    incompatible_keys = model_to_load.load_state_dict(compatible_state, strict=False)
+    if incompatible_keys.unexpected_keys:
+        raise RuntimeError(f"Initial checkpoint has unexpected_keys={sorted(incompatible_keys.unexpected_keys)}")
+
+
+def _forward_with_autocast(model, observation, actions, *, enabled: bool, device_type: str):
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=enabled):
+        return model(observation, actions)
 
 
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_config):
@@ -485,9 +552,7 @@ def train_loop(config: _config.TrainConfig):
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
         _validate_fp32_training_state(model, config.pytorch_training_precision, model_path)
-        safetensors.torch.load_model(
-            (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path
-        )
+        _load_initial_weights(model, model_path, config.weight_loader)
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
     _validate_fp32_training_state(model, config.pytorch_training_precision)
@@ -530,6 +595,7 @@ def train_loop(config: _config.TrainConfig):
         return end_lr + (peak_lr - end_lr) * cos
 
     model.train()
+    autocast_enabled = config.pytorch_autocast and device.type == "cuda"
     start_time = time.time()
     infos = []  # Collect stats over log interval
     if is_main:
@@ -548,6 +614,7 @@ def train_loop(config: _config.TrainConfig):
         )
         logging.info("EMA is not supported for PyTorch training")
         logging.info(f"Training precision: {model_cfg.dtype}")
+        logging.info(f"BF16 autocast: {autocast_enabled}")
 
     # Training loop - iterate until we reach num_train_steps
     pbar = (
@@ -576,7 +643,13 @@ def train_loop(config: _config.TrainConfig):
                 pg["lr"] = lr_schedule(global_step)
 
             # Forward pass
-            losses = model(observation, actions)
+            losses = _forward_with_autocast(
+                model,
+                observation,
+                actions,
+                enabled=autocast_enabled,
+                device_type=device.type,
+            )
             # Ensure losses is a tensor and handle different return types
             if isinstance(losses, list | tuple):
                 losses = torch.stack(losses)

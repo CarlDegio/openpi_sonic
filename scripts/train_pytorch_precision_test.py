@@ -18,6 +18,15 @@ class _TinyTrainingModel(torch.nn.Module):
         self.register_buffer("index", torch.ones(1, dtype=torch.int64))
 
 
+class _TinyAutocastModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 2)
+
+    def forward(self, observation, actions):
+        return self.linear(observation + actions)
+
+
 def test_fp32_training_state_accepts_fp32_model_and_file(tmp_path: pathlib.Path):
     path = tmp_path / "model.safetensors"
     save_file({"weight": torch.ones(2), "index": torch.ones(1, dtype=torch.int64)}, path)
@@ -64,3 +73,21 @@ def test_fp32_training_state_unwraps_ddp(monkeypatch):
     monkeypatch.setattr(train_pytorch.torch.nn.parallel, "DistributedDataParallel", _FakeDDP)
 
     train_pytorch._validate_fp32_training_state(_FakeDDP(_TinyTrainingModel()), "float32")
+
+
+@pytest.mark.parametrize(("enabled", "output_dtype"), [(False, torch.float32), (True, torch.bfloat16)])
+def test_forward_autocast_keeps_fp32_master_weights(enabled, output_dtype):
+    model = _TinyAutocastModel()
+    observation = torch.ones((2, 2))
+    actions = torch.ones((2, 2))
+
+    output = train_pytorch._forward_with_autocast(
+        model,
+        observation,
+        actions,
+        enabled=enabled,
+        device_type="cpu",
+    )
+
+    assert output.dtype == output_dtype
+    assert model.linear.weight.dtype == torch.float32
