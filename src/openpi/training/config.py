@@ -1012,7 +1012,7 @@ _CONFIGS = [
     _make_g1_sonic_full_config("pi05_g1_sonic_full_movedoor_4cam", "MoveDoorMerge4Cam"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_clean_desk", "CleanDeskMerge"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk", "WalkCleanDesk"),
-    _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk_mix", "WalkCleanDesk_mix_CleanDesk"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk_mix", "WalkCleanDesk_mix"),
     
     #
     # Fine-tuning Aloha configs.
