@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import dataclasses
 import json
 import logging
 import pathlib
 import time
 from typing import Any
-from typing import Callable
 
 import numpy as np
 import polars as pl
+import tyro
+import zmq
 
 if __package__:
     from scripts.serve_g1_sonic_zmq_policy import Gr00tMsgpack
@@ -29,6 +31,35 @@ ACTION_COLUMNS = {
     "left_hand_joints": ("teleop.left_hand_joints", 7),
     "right_hand_joints": ("teleop.right_hand_joints", 7),
 }
+
+
+@dataclasses.dataclass
+class Args:
+    """Arguments for the G1 SONIC replay ZMQ policy server."""
+
+    dataset_dir: pathlib.Path = pathlib.Path("replay_data/walk_clean_desk2")
+    """LeRobot dataset root containing meta/ and data/."""
+
+    episode_id: int = 0
+    """Episode parquet identifier to replay."""
+
+    host: str = "0.0.0.0"
+    """Host/IP to bind."""
+
+    port: int = 29999
+    """ZMQ REP port to bind."""
+
+    horizon: int = 70
+    """Number of recorded frames returned per action request."""
+
+    inference_delay_s: float = 0.2
+    """Artificial server-side inference delay in seconds."""
+
+    timeout_ms: int = 0
+    """Receive timeout in milliseconds. 0 means wait forever."""
+
+    verbose_timing: bool = False
+    """Print per-request timing."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,12 +93,7 @@ class ReplayEpisode:
         if fps <= 0:
             raise ValueError(f"Dataset fps must be positive, got {fps}")
 
-        parquet_path = (
-            dataset_dir
-            / "data"
-            / f"chunk-{episode_id // 1000:03d}"
-            / f"episode_{episode_id:06d}.parquet"
-        )
+        parquet_path = dataset_dir / "data" / f"chunk-{episode_id // 1000:03d}" / f"episode_{episode_id:06d}.parquet"
         if not parquet_path.is_file():
             raise FileNotFoundError(f"Missing episode parquet: {parquet_path}")
 
@@ -207,3 +233,82 @@ class ReplayRequestHandler:
                 info["action_shapes"],
             )
         return action, info
+
+
+class G1ReplayZmqServer:
+    """Expose a replay request handler through a GR00T-compatible REP socket."""
+
+    def __init__(
+        self,
+        handler: ReplayRequestHandler,
+        *,
+        host: str,
+        port: int,
+        timeout_ms: int = 0,
+    ) -> None:
+        self._handler = handler
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.REP)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        if timeout_ms > 0:
+            self._socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        self._endpoint = f"tcp://{host}:{port}"
+        self._socket.bind(self._endpoint)
+
+    def close(self) -> None:
+        self._socket.close()
+        self._context.term()
+
+    def serve_forever(self) -> None:
+        logging.info("Replay server ready on %s", self._endpoint)
+        while self._handler.running:
+            try:
+                raw = self._socket.recv()
+            except zmq.Again:
+                continue
+
+            try:
+                request = Gr00tMsgpack.unpackb(raw)
+                result = self._handler.handle(request)
+            except Exception as exc:
+                logging.exception("Error while handling replay request")
+                result = {"error": str(exc)}
+            self._socket.send(Gr00tMsgpack.packb(result))
+
+
+def main(args: Args) -> None:
+    episode = ReplayEpisode.load(args.dataset_dir, args.episode_id)
+    timeline = ReplayTimeline(episode, horizon=args.horizon)
+    handler = ReplayRequestHandler(
+        timeline,
+        episode=episode,
+        inference_delay_s=args.inference_delay_s,
+        verbose_timing=args.verbose_timing,
+    )
+    logging.info(
+        "Loaded replay dataset=%s episode=%d frames=%d fps=%.2f horizon=%d delay=%.3fs",
+        episode.dataset_dir,
+        episode.episode_id,
+        episode.length,
+        episode.fps,
+        args.horizon,
+        args.inference_delay_s,
+    )
+
+    server = G1ReplayZmqServer(
+        handler,
+        host=args.host,
+        port=args.port,
+        timeout_ms=args.timeout_ms,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logging.info("Interrupted, shutting down replay server")
+    finally:
+        server.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, force=True)
+    main(tyro.cli(Args))

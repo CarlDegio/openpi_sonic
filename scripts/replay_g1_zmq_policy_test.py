@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
+import sys
+import threading
 
 import numpy as np
 import polars as pl
 import pytest
+import zmq
 
+from scripts.replay_g1_zmq_policy import G1ReplayZmqServer
+from scripts.replay_g1_zmq_policy import Gr00tMsgpack
 from scripts.replay_g1_zmq_policy import ReplayEpisode
 from scripts.replay_g1_zmq_policy import ReplayRequestHandler
 from scripts.replay_g1_zmq_policy import ReplayTimeline
-from scripts.replay_g1_zmq_policy import Gr00tMsgpack
-
 
 ACTION_COLUMNS = {
     "motion_token": ("action.motion_token", 64),
@@ -317,3 +321,67 @@ def test_msgpack_round_trip_preserves_replay_action_arrays(tmp_path: pathlib.Pat
     assert action["left_hand_joints"].shape == (70, 7)
     assert action["right_hand_joints"].shape == (70, 7)
     assert all(value.dtype == np.float32 for value in action.values())
+
+
+def test_zmq_server_round_trips_policy_endpoints_and_stops_on_kill(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+    handler = ReplayRequestHandler(
+        ReplayTimeline(episode, horizon=70),
+        episode=episode,
+        inference_delay_s=0.0,
+    )
+
+    probe_context = zmq.Context()
+    probe = probe_context.socket(zmq.REP)
+    port = probe.bind_to_random_port("tcp://127.0.0.1")
+    probe.close()
+    probe_context.term()
+
+    server = G1ReplayZmqServer(handler, host="127.0.0.1", port=port, timeout_ms=100)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.start()
+
+    client_context = zmq.Context()
+    client = client_context.socket(zmq.REQ)
+    client.setsockopt(zmq.RCVTIMEO, 2000)
+    client.setsockopt(zmq.SNDTIMEO, 2000)
+    client.connect(f"tcp://127.0.0.1:{port}")
+
+    def request(payload: dict) -> object:
+        client.send(Gr00tMsgpack.packb(payload))
+        return Gr00tMsgpack.unpackb(client.recv())
+
+    try:
+        assert request({"endpoint": "ping"})["status"] == "ok"
+        response = request({"endpoint": "get_action", "data": {"observation": {}}})
+        action, info = response
+        assert info["replay"]["start_frame"] == 0
+        assert action["motion_token"].shape == (70, 64)
+        assert action["left_hand_joints"].shape == (70, 7)
+        assert action["right_hand_joints"].shape == (70, 7)
+        assert request({"endpoint": "reset"}) == {"status": "ok"}
+        assert request({"endpoint": "kill"})["status"] == "ok"
+        server_thread.join(timeout=2.0)
+        assert not server_thread.is_alive()
+    finally:
+        client.close()
+        client_context.term()
+        if server_thread.is_alive():
+            handler.running = False
+            server_thread.join(timeout=1.0)
+        server.close()
+
+
+def test_replay_script_help_exposes_dataset_episode_and_timing_options():
+    result = subprocess.run(
+        [sys.executable, "scripts/replay_g1_zmq_policy.py", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--dataset-dir" in result.stdout
+    assert "--episode-id" in result.stdout
+    assert "--horizon" in result.stdout
+    assert "--inference-delay-s" in result.stdout
