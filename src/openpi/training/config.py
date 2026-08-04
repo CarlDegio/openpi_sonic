@@ -712,7 +712,7 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=78,
-            action_horizon=70,
+            action_horizon=50,
             max_token_len=256,
             image_keys=G1_SONIC_IMAGE_KEYS,
         ),
@@ -736,9 +736,10 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
             peak_lr=1e-4,
-            decay_steps=40000,
+            decay_steps=25000,
             decay_lr=1e-5,
         ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.99,
     )
 
