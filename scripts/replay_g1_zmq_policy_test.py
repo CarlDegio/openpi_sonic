@@ -8,7 +8,9 @@ import polars as pl
 import pytest
 
 from scripts.replay_g1_zmq_policy import ReplayEpisode
+from scripts.replay_g1_zmq_policy import ReplayRequestHandler
 from scripts.replay_g1_zmq_policy import ReplayTimeline
+from scripts.replay_g1_zmq_policy import Gr00tMsgpack
 
 
 ACTION_COLUMNS = {
@@ -16,6 +18,19 @@ ACTION_COLUMNS = {
     "left_hand_joints": ("teleop.left_hand_joints", 7),
     "right_hand_joints": ("teleop.right_hand_joints", 7),
 }
+
+
+class _FakeClock:
+    def __init__(self, now: float) -> None:
+        self.now = now
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 def _write_episode(
@@ -171,3 +186,134 @@ def test_timeline_rejects_non_positive_horizon(tmp_path: pathlib.Path):
 
     with pytest.raises(ValueError, match="horizon must be positive"):
         ReplayTimeline(episode, horizon=0)
+
+
+def test_handler_applies_delay_after_selecting_request_time_chunk(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+    timeline = ReplayTimeline(episode, horizon=70)
+    clock = _FakeClock(100.0)
+    handler = ReplayRequestHandler(
+        timeline,
+        episode=episode,
+        inference_delay_s=0.2,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    first_action, first_info = handler.handle({"endpoint": "get_action", "data": {"observation": {}}})
+    clock.now = 101.0
+    second_action, second_info = handler.handle({"endpoint": "get_action", "data": {"observation": {}}})
+
+    assert clock.sleeps == [0.2, 0.2]
+    assert first_info["replay"] == {"episode_id": 0, "start_frame": 0, "start_time_s": 0.0}
+    assert second_info["replay"] == {"episode_id": 0, "start_frame": 50, "start_time_s": 1.0}
+    assert first_info["server_timing"] == {"convert_ms": 0.0, "infer_ms": pytest.approx(200.0)}
+    assert first_info["action_shapes"] == {
+        "motion_token": [70, 64],
+        "left_hand_joints": [70, 7],
+        "right_hand_joints": [70, 7],
+    }
+    np.testing.assert_array_equal(first_action["motion_token"][50:], second_action["motion_token"][:20])
+
+
+def test_handler_control_endpoints_are_immediate_and_reset_restarts_replay(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+    timeline = ReplayTimeline(episode, horizon=70)
+    clock = _FakeClock(10.0)
+    handler = ReplayRequestHandler(
+        timeline,
+        episode=episode,
+        inference_delay_s=0.2,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    handler.handle({"endpoint": "get_action", "data": {"observation": {}}})
+    clock.now = 11.0
+
+    assert handler.handle({"endpoint": "ping"})["status"] == "ok"
+    metadata = handler.handle({"endpoint": "get_metadata"})
+    assert metadata == {
+        "dataset_dir": str(episode.dataset_dir),
+        "episode_id": 0,
+        "fps": 50.0,
+        "episode_length": 130,
+        "horizon": 70,
+        "inference_delay_s": 0.2,
+    }
+    assert handler.handle({"endpoint": "reset"}) == {"status": "ok"}
+    reset_action, reset_info = handler.handle({"endpoint": "get_action", "data": {"observation": {}}})
+
+    assert clock.sleeps == [0.2, 0.2]
+    assert reset_info["replay"]["start_frame"] == 0
+    assert reset_action["motion_token"][0, 0] == 0
+
+
+def test_handler_kill_changes_running_state_without_delay(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+    clock = _FakeClock(10.0)
+    handler = ReplayRequestHandler(
+        ReplayTimeline(episode, horizon=70),
+        episode=episode,
+        inference_delay_s=0.2,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    response = handler.handle({"endpoint": "kill"})
+
+    assert response["status"] == "ok"
+    assert handler.running is False
+    assert clock.sleeps == []
+
+
+def test_handler_rejects_missing_observation_and_unknown_endpoint(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+    clock = _FakeClock(10.0)
+    handler = ReplayRequestHandler(
+        ReplayTimeline(episode, horizon=70),
+        episode=episode,
+        inference_delay_s=0.2,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(ValueError, match=r"must include data\['observation'\]"):
+        handler.handle({"endpoint": "get_action", "data": {}})
+    with pytest.raises(ValueError, match="Unknown endpoint: unsupported"):
+        handler.handle({"endpoint": "unsupported"})
+    assert clock.sleeps == []
+
+
+def test_handler_rejects_negative_inference_delay(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+
+    with pytest.raises(ValueError, match="inference_delay_s must be non-negative"):
+        ReplayRequestHandler(
+            ReplayTimeline(episode, horizon=70),
+            episode=episode,
+            inference_delay_s=-0.1,
+        )
+
+
+def test_msgpack_round_trip_preserves_replay_action_arrays(tmp_path: pathlib.Path):
+    episode = ReplayEpisode.load(_write_episode(tmp_path / "dataset"), episode_id=0)
+    clock = _FakeClock(10.0)
+    handler = ReplayRequestHandler(
+        ReplayTimeline(episode, horizon=70),
+        episode=episode,
+        inference_delay_s=0.0,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    response = handler.handle({"endpoint": "get_action", "data": {"observation": {}}})
+
+    unpacked = Gr00tMsgpack.unpackb(Gr00tMsgpack.packb(response))
+
+    assert isinstance(unpacked, list)
+    assert len(unpacked) == 2
+    action, info = unpacked
+    assert info["replay"]["start_frame"] == 0
+    assert action["motion_token"].shape == (70, 64)
+    assert action["left_hand_joints"].shape == (70, 7)
+    assert action["right_hand_joints"].shape == (70, 7)
+    assert all(value.dtype == np.float32 for value in action.values())

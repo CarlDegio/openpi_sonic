@@ -5,10 +5,23 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import pathlib
+import time
+from typing import Any
+from typing import Callable
 
 import numpy as np
 import polars as pl
+
+if __package__:
+    from scripts.serve_g1_sonic_zmq_policy import Gr00tMsgpack
+    from scripts.serve_g1_sonic_zmq_policy import _shape_summary
+    from scripts.serve_g1_sonic_zmq_policy import validate_action
+else:
+    from serve_g1_sonic_zmq_policy import Gr00tMsgpack
+    from serve_g1_sonic_zmq_policy import _shape_summary
+    from serve_g1_sonic_zmq_policy import validate_action
 
 
 ACTION_COLUMNS = {
@@ -101,6 +114,10 @@ class ReplayTimeline:
     def reset(self) -> None:
         self._anchor_time = None
 
+    @property
+    def horizon(self) -> int:
+        return self._horizon
+
     def get_action(self, request_time: float) -> tuple[dict[str, np.ndarray], int]:
         if self._anchor_time is None:
             self._anchor_time = request_time
@@ -111,3 +128,82 @@ class ReplayTimeline:
             for key, value in self._episode.actions.items()
         }
         return action, start_frame
+
+
+class ReplayRequestHandler:
+    """Implement replay policy endpoints independently of the ZMQ transport."""
+
+    def __init__(
+        self,
+        timeline: ReplayTimeline,
+        *,
+        episode: ReplayEpisode,
+        inference_delay_s: float,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        verbose_timing: bool = False,
+    ) -> None:
+        if inference_delay_s < 0:
+            raise ValueError(f"inference_delay_s must be non-negative, got {inference_delay_s}")
+        self._timeline = timeline
+        self._episode = episode
+        self._inference_delay_s = inference_delay_s
+        self._clock = clock
+        self._sleep = sleep
+        self._verbose_timing = verbose_timing
+        self.running = True
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "dataset_dir": str(self._episode.dataset_dir),
+            "episode_id": self._episode.episode_id,
+            "fps": self._episode.fps,
+            "episode_length": self._episode.length,
+            "horizon": self._timeline.horizon,
+            "inference_delay_s": self._inference_delay_s,
+        }
+
+    def handle(self, request: dict[str, Any]) -> Any:
+        endpoint = request.get("endpoint", "get_action")
+
+        if endpoint == "ping":
+            return {"status": "ok", "message": "G1 SONIC replay ZMQ server is running"}
+        if endpoint == "kill":
+            self.running = False
+            return {"status": "ok", "message": "Server shutting down"}
+        if endpoint == "reset":
+            self._timeline.reset()
+            return {"status": "ok"}
+        if endpoint == "get_metadata":
+            return self.metadata
+        if endpoint != "get_action":
+            raise ValueError(f"Unknown endpoint: {endpoint}")
+
+        data = request.get("data", {})
+        if not isinstance(data, dict) or "observation" not in data:
+            raise ValueError("get_action request must include data['observation']")
+
+        request_time = self._clock()
+        action, start_frame = self._timeline.get_action(request_time)
+        self._sleep(self._inference_delay_s)
+        infer_ms = (self._clock() - request_time) * 1000
+
+        validate_action(action, max_motion_token_abs=1.25)
+        info = {
+            "replay": {
+                "episode_id": self._episode.episode_id,
+                "start_frame": start_frame,
+                "start_time_s": start_frame / self._episode.fps,
+            },
+            "server_timing": {"convert_ms": 0.0, "infer_ms": infer_ms},
+            "action_shapes": _shape_summary(action),
+        }
+        if self._verbose_timing:
+            logging.info(
+                "replay request done start_frame=%d infer=%.2fms shapes=%s",
+                start_frame,
+                infer_ms,
+                info["action_shapes"],
+            )
+        return action, info
