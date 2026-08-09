@@ -8,6 +8,8 @@ OpenPI checkpoint.
 """
 
 from __future__ import annotations
+import os
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import dataclasses
 import logging
@@ -351,11 +353,24 @@ class OpenPIG1SonicZmqServer:
             "action_shapes": _shape_summary(action),
         }
         if self._args.verbose_timing:
+            state = np.asarray(openpi_obs["observation"]["state"])
+            left_gripper_trajectory = np.asarray(action["left_hand_joints"])[::5, 0]
+            right_gripper_trajectory = np.asarray(action["right_hand_joints"])[::5, 0]
+            sampled_steps = np.arange(0, np.asarray(action["left_hand_joints"]).shape[0], 5)
             logging.info(
-                "request done convert=%.2fms infer=%.2fms shapes=%s",
+                "request done convert=%.2fms infer=%.2fms shapes=%s "
+                "gripper_state(q[22:26]=%s, q[26]=%.4f, q[36:40]=%s, q[40]=%.4f) "
+                "gripper_action(step=%s, action[64]=%s, action[71]=%s)",
                 convert_ms,
                 infer_ms,
                 info["action_shapes"],
+                state[22:26].tolist(),
+                state[26],
+                state[36:40].tolist(),
+                state[40],
+                sampled_steps.tolist(),
+                left_gripper_trajectory.tolist(),
+                right_gripper_trajectory.tolist(),
             )
         return action, info
 
