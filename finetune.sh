@@ -13,8 +13,8 @@ export TRANSFORMERS_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
 # export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
-python scripts/train.py pi05_g1_sonic_full_walk_clean_desk_mix \
---exp-name walk_clean_desk_mix_full_50 \
+python scripts/train.py pi05_g1_sonic_full_collect_pill \
+--exp-name collect_pill_50 \
 --num-train-steps 30000 \
 --save-interval 5000 \
 --keep-period 15000 \
