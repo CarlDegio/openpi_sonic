@@ -736,7 +736,7 @@ def _make_g1_sonic_full_config(name: str, repo_id: str) -> TrainConfig:
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1000,
             peak_lr=1e-4,
-            decay_steps=25000,
+            decay_steps=30000,
             decay_lr=1e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
@@ -1015,6 +1015,7 @@ _CONFIGS = [
     _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk", "WalkCleanDesk"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_walk_clean_desk_mix", "WalkCleanDesk_mix"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pill", "CollectPill"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pill_mix", "CollectPillMix"),
     
     #
     # Fine-tuning Aloha configs.
