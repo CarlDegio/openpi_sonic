@@ -1017,6 +1017,7 @@ _CONFIGS = [
     _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pill", "CollectPill"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_collect_pill_mix", "CollectPillMix"),
     _make_g1_sonic_full_config("pi05_g1_sonic_full_carry_box", "CarryBox"),
+    _make_g1_sonic_full_config("pi05_g1_sonic_full_carry_box_big", "CarryBoxBig"),
     
     #
     # Fine-tuning Aloha configs.
